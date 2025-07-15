@@ -1,65 +1,88 @@
-// screens/LeadsScreen.tsx
-
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, FlatList, ActivityIndicator, Alert, TouchableOpacity, SafeAreaView, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, Alert, TouchableOpacity, SafeAreaView, RefreshControl, Dimensions } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { StackScreenProps } from '@react-navigation/stack';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+  FadeIn,
+  SlideInRight,
+  Layout,
+} from 'react-native-reanimated';
 import { useAuth } from '../hooks/useAuth';
 import { useLeads } from '../hooks/useLeads';
 import { Lead } from '../types/lead';
-import { Button } from '../components/ui/Button';
+import { AnimatedButton } from '../components/ui/AnimatedButton';
+import { Card } from '../components/ui/Card';
 import { PermissionService } from '../lib/permissions';
 import { LeadsStackParamList } from '../navigation/types';
-import { theme } from '../theme'; // Import your theme
+import { theme } from '../theme';
+
+const { width } = Dimensions.get('window');
 
 type LeadsScreenNavigationProp = StackScreenProps<LeadsStackParamList, 'LeadsList'>['navigation'];
 
 const LeadsScreen = () => {
   const navigation = useNavigation<LeadsScreenNavigationProp>();
-  const { user } = useAuth(); // Get the current user from the AuthContext
+  const { user } = useAuth();
   const { leads, loading, error, fetchLeads, deleteLead } = useLeads();
   const permissionService = PermissionService.getInstance();
 
-  // Removed isAddModalOpen, isImportModalOpen, isExportModalOpen as they seem unused here
-  const [refreshing, setRefreshing] = useState(false); // For pull-to-refresh
+  const [refreshing, setRefreshing] = useState(false);
+  const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
+  const [selectedFilter, setSelectedFilter] = useState<'all' | 'new' | 'contacted' | 'qualified'>('all');
+
+  const headerOpacity = useSharedValue(0);
+  const listOpacity = useSharedValue(0);
 
   const canCreateLeads = permissionService.hasPermission(user, 'leads', 'create');
-  // const canImportExportLeads = permissionService.hasPermission(user, 'reports', 'export'); // This variable is not used in the provided code
 
-  // Filtered leads state
-  const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
+  React.useEffect(() => {
+    headerOpacity.value = withTiming(1, { duration: theme.animations.timing.medium });
+    listOpacity.value = withTiming(1, { duration: theme.animations.timing.medium });
+  }, []);
+
+  const headerAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: headerOpacity.value,
+  }));
+
+  const listAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: listOpacity.value,
+  }));
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchLeads('Lead'); // Ensure it fetches 'Lead' type on refresh
+    await fetchLeads('Lead');
     setRefreshing(false);
   }, [fetchLeads]);
 
-
   useEffect(() => {
     if (leads && user) {
-      if (user.role === 'admin') {
-        // Admin can view all leads
-        setFilteredLeads(leads);
-      } else {
-        // Agents can only view leads assigned to them
-        setFilteredLeads(leads.filter(lead => lead.assignedAgent === user.id));
+      let filtered = user.role === 'admin' ? leads : leads.filter(lead => lead.assignedAgent === user.id);
+      
+      if (selectedFilter !== 'all') {
+        filtered = filtered.filter(lead => lead.status.toLowerCase() === selectedFilter);
       }
+      
+      setFilteredLeads(filtered);
     } else {
       setFilteredLeads([]);
     }
-  }, [leads, user]);
+  }, [leads, user, selectedFilter]);
 
   useFocusEffect(
     useCallback(() => {
-      fetchLeads('Lead'); // Re-fetch leads when the screen comes into focus
+      fetchLeads('Lead');
     }, [fetchLeads])
   );
 
   const handleAddLead = () => {
     if (canCreateLeads) {
-      navigation.navigate('AddEditLead', { leadId: undefined }); // Pass leadType for new lead
+      navigation.navigate('AddEditLead', { leadId: undefined });
     } else {
       Alert.alert('Permission Denied', 'You do not have permission to create leads.');
     }
@@ -78,7 +101,6 @@ const LeadsScreen = () => {
               try {
                 await deleteLead(id);
                 Alert.alert("Success", "Lead deleted successfully!");
-                // No need to refetch here, useLeads hook updates its state
               } catch (err: any) {
                 Alert.alert("Error", err.message || "Failed to delete lead.");
               }
@@ -93,67 +115,115 @@ const LeadsScreen = () => {
     }
   };
 
-  const getStatusStyle = (status: Lead['status']) => {
-    switch (status) {
-      case 'New': return { backgroundColor: theme.colors.secondary + '20', color: theme.colors.secondary };
-      case 'Contacted': return { backgroundColor: theme.colors.primary + '20', color: theme.colors.primary };
-      case 'Qualified': return { backgroundColor: theme.colors.success + '20', color: theme.colors.success };
-      case 'Converted': return { backgroundColor: theme.colors.accent + '20', color: theme.colors.accent };
-      case 'Lost': return { backgroundColor: theme.colors.danger + '20', color: theme.colors.danger };
-      case 'Hold': return { backgroundColor: theme.colors.warning + '20', color: theme.colors.warning };
-      default: return { backgroundColor: theme.colors.background.dark, color: theme.colors.text.medium };
-    }
+  const getStatusColor = (status: Lead['status']) => {
+    const statusColors = {
+      'New': theme.colors.secondary,
+      'Contacted': theme.colors.primary,
+      'Qualified': theme.colors.success,
+      'Nurturing': theme.colors.warning,
+      'Site Visit Scheduled': theme.colors.accent,
+      'Site Visited': theme.colors.primaryLight,
+      'Negotiation': theme.colors.warning,
+      'Converted': theme.colors.success,
+      'Lost': theme.colors.danger,
+      'Hold': theme.colors.text.tertiary,
+    };
+    return statusColors[status] || theme.colors.text.tertiary;
   };
 
-  const renderLeadCard = ({ item }: { item: Lead }) => {
-    const statusStyle = getStatusStyle(item.status);
+  const FilterButton = ({ filter, label }: { filter: typeof selectedFilter; label: string }) => {
+    const isSelected = selectedFilter === filter;
     return (
       <TouchableOpacity
-        style={styles.leadCard}
-        onPress={() => navigation.navigate('LeadDetails', { leadId: item.id })}
-        activeOpacity={0.8}
+        onPress={() => setSelectedFilter(filter)}
+        style={[
+          styles.filterButton,
+          isSelected && styles.selectedFilterButton,
+        ]}
       >
-        <View style={styles.leadCardHeader}>
-          <Text style={styles.leadName}>{item.name}</Text>
-          <Text style={[styles.leadStatus, { backgroundColor: statusStyle.backgroundColor, color: statusStyle.color }]}>{item.status}</Text>
-        </View>
-        <View style={styles.leadInfo}>
-          <Text style={styles.leadDetail}>
-            <Ionicons name="mail-outline" size={theme.typography.fontSize.small} color={theme.colors.text.medium} /> <Text style={styles.detailLabel}>Email:</Text> {item.primaryEmail}
-          </Text>
-          <Text style={styles.leadDetail}>
-            <Ionicons name="call-outline" size={theme.typography.fontSize.small} color={theme.colors.text.medium} /> <Text style={styles.detailLabel}>Phone:</Text> {item.primaryPhone}
-          </Text>
-          <Text style={styles.leadDetail}>
-            <Ionicons name="globe-outline" size={theme.typography.fontSize.small} color={theme.colors.text.medium} /> <Text style={styles.detailLabel}>Source:</Text> {item.source}
-          </Text>
-          <Text style={styles.leadDetail}>
-            <Ionicons name="person-outline" size={theme.typography.fontSize.small} color={theme.colors.text.medium} /> <Text style={styles.detailLabel}>Assigned Agent:</Text> {item.assignedAgent || 'Unassigned'}
-          </Text>
-        </View>
-        <View style={styles.leadActions}>
-          {permissionService.hasPermission(user, 'leads', 'update') && (
-            <Button
-              title="Edit"
-              onPress={() => navigation.navigate('AddEditLead', { leadId: item.id })}
-              variant="outline"
-              icon={<Ionicons name="create-outline" size={18} color={theme.colors.primary} />}
-            />
-          )}
-          {permissionService.hasPermission(user, 'leads', 'delete') && (
-            <Button
-              title="Delete"
-              onPress={() => handleDeleteLead(item.id)}
-              variant="destructive"
-              icon={<Ionicons name="trash-outline" size={18} color={theme.colors.text.white} />}
-            />
-          )}
-        </View>
+        <Text style={[
+          styles.filterButtonText,
+          isSelected && styles.selectedFilterButtonText,
+        ]}>
+          {label}
+        </Text>
       </TouchableOpacity>
     );
   };
 
-  if (loading && !refreshing) { // Show full-screen loader only on initial load
+  const renderLeadCard = ({ item, index }: { item: Lead; index: number }) => {
+    const statusColor = getStatusColor(item.status);
+    
+    return (
+      <Animated.View
+        entering={SlideInRight.delay(index * 100)}
+        layout={Layout.springify()}
+        style={styles.leadCardContainer}
+      >
+        <Card pressable onPress={() => navigation.navigate('LeadDetails', { leadId: item.id })}>
+          <View style={styles.leadCardHeader}>
+            <View style={styles.leadInfo}>
+              <Text style={styles.leadName}>{item.name}</Text>
+              <View style={styles.leadMeta}>
+                <Ionicons name="mail-outline" size={14} color={theme.colors.text.tertiary} />
+                <Text style={styles.leadEmail}>{item.primaryEmail}</Text>
+              </View>
+            </View>
+            <View style={[styles.statusBadge, { backgroundColor: statusColor + '20' }]}>
+              <Text style={[styles.statusText, { color: statusColor }]}>{item.status}</Text>
+            </View>
+          </View>
+
+          <View style={styles.leadDetails}>
+            <View style={styles.detailRow}>
+              <Ionicons name="call-outline" size={16} color={theme.colors.text.tertiary} />
+              <Text style={styles.detailText}>{item.primaryPhone}</Text>
+            </View>
+            <View style={styles.detailRow}>
+              <Ionicons name="globe-outline" size={16} color={theme.colors.text.tertiary} />
+              <Text style={styles.detailText}>{item.source}</Text>
+            </View>
+            <View style={styles.detailRow}>
+              <Ionicons name="person-outline" size={16} color={theme.colors.text.tertiary} />
+              <Text style={styles.detailText}>{item.assignedAgent || 'Unassigned'}</Text>
+            </View>
+          </View>
+
+          <View style={styles.leadActions}>
+            <View style={styles.leadScore}>
+              <View style={[
+                styles.scoreIndicator,
+                { backgroundColor: item.leadScore === 'High' ? theme.colors.success : 
+                  item.leadScore === 'Medium' ? theme.colors.warning : theme.colors.danger }
+              ]} />
+              <Text style={styles.scoreText}>{item.leadScore} Priority</Text>
+            </View>
+            
+            <View style={styles.actionButtons}>
+              {permissionService.hasPermission(user, 'leads', 'update') && (
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('AddEditLead', { leadId: item.id })}
+                  style={[styles.actionButton, { backgroundColor: theme.colors.primary + '20' }]}
+                >
+                  <Ionicons name="create-outline" size={18} color={theme.colors.primary} />
+                </TouchableOpacity>
+              )}
+              {permissionService.hasPermission(user, 'leads', 'delete') && (
+                <TouchableOpacity
+                  onPress={() => handleDeleteLead(item.id)}
+                  style={[styles.actionButton, { backgroundColor: theme.colors.danger + '20' }]}
+                >
+                  <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </Card>
+      </Animated.View>
+    );
+  };
+
+  if (loading && !refreshing) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={theme.colors.primary} />
@@ -165,198 +235,288 @@ const LeadsScreen = () => {
   if (error) {
     return (
       <View style={styles.centered}>
+        <Ionicons name="alert-circle-outline" size={64} color={theme.colors.danger} />
         <Text style={styles.errorText}>Error: {error}</Text>
-        <Button title="Retry" onPress={() => fetchLeads('Lead')} />
+        <AnimatedButton title="Retry" onPress={() => fetchLeads('Lead')} />
       </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <Text style={styles.title}>All Leads</Text>
-        <View style={styles.headerButtons}>
-          {canCreateLeads && (
-            <TouchableOpacity onPress={handleAddLead} style={styles.addButton} activeOpacity={0.7}>
-              <Ionicons name="add-circle" size={theme.typography.fontSize.h2 + 5} color={theme.colors.primary} />
-              <Text style={styles.addButtonText}>Add Lead</Text>
-            </TouchableOpacity>
-          )}
-          {/* Add Import/Export buttons if needed and permitted */}
-        </View>
-      </View>
+    <SafeAreaView style={styles.container}>
+      {/* Animated Header */}
+      <Animated.View style={[styles.header, headerAnimatedStyle]}>
+        <LinearGradient
+          colors={theme.colors.background.gradient.primary}
+          style={styles.headerGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        >
+          <View style={styles.headerContent}>
+            <View>
+              <Text style={styles.headerTitle}>All Leads</Text>
+              <Text style={styles.headerSubtitle}>{filteredLeads.length} leads found</Text>
+            </View>
+            {canCreateLeads && (
+              <TouchableOpacity onPress={handleAddLead} style={styles.addButton}>
+                <LinearGradient
+                  colors={[theme.colors.text.white, theme.colors.background.secondary]}
+                  style={styles.addButtonGradient}
+                >
+                  <Ionicons name="add" size={24} color={theme.colors.primary} />
+                </LinearGradient>
+              </TouchableOpacity>
+            )}
+          </View>
+        </LinearGradient>
+      </Animated.View>
 
-      {filteredLeads.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Ionicons name="people-circle-outline" size={theme.typography.fontSize.h1 * 2} color={theme.colors.text.light} />
-          <Text style={styles.emptyStateText}>No leads found yet. Start by adding a new lead!</Text>
-          {canCreateLeads && (
-            <Button title="Add New Lead" onPress={handleAddLead} />
-          )}
-        </View>
-      ) : (
-        <FlatList
-          data={filteredLeads}
-          keyExtractor={(item) => item.id}
-          renderItem={renderLeadCard}
-          contentContainerStyle={styles.listContentContainer}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={theme.colors.primary}
-            />
-          }
-        />
-      )}
+      {/* Filter Buttons */}
+      <Animated.View style={styles.filterContainer} entering={FadeIn.delay(300)}>
+        <FilterButton filter="all" label="All" />
+        <FilterButton filter="new" label="New" />
+        <FilterButton filter="contacted" label="Contacted" />
+        <FilterButton filter="qualified" label="Qualified" />
+      </Animated.View>
+
+      {/* Leads List */}
+      <Animated.View style={[styles.listContainer, listAnimatedStyle]}>
+        {filteredLeads.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Ionicons name="people-circle-outline" size={80} color={theme.colors.text.quaternary} />
+            <Text style={styles.emptyStateTitle}>No leads found</Text>
+            <Text style={styles.emptyStateText}>
+              {selectedFilter === 'all' 
+                ? "Start by adding your first lead!" 
+                : `No ${selectedFilter} leads at the moment.`}
+            </Text>
+            {canCreateLeads && selectedFilter === 'all' && (
+              <AnimatedButton 
+                title="Add New Lead" 
+                onPress={handleAddLead} 
+                gradient={true}
+                style={styles.emptyStateButton}
+              />
+            )}
+          </View>
+        ) : (
+          <FlatList
+            data={filteredLeads}
+            keyExtractor={(item) => item.id}
+            renderItem={renderLeadCard}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={theme.colors.primary}
+                colors={[theme.colors.primary]}
+              />
+            }
+          />
+        )}
+      </Animated.View>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: theme.colors.background.screen,
-  },
   container: {
     flex: 1,
-    backgroundColor: theme.colors.background.screen,
+    backgroundColor: theme.colors.background.secondary,
   },
   header: {
-    paddingHorizontal: theme.spacing.large,
-    paddingVertical: theme.spacing.medium,
-    backgroundColor: theme.colors.background.card,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border,
+    marginBottom: theme.spacing.medium,
+  },
+  headerGradient: {
+    paddingTop: theme.spacing.large,
+    paddingBottom: theme.spacing.xlarge,
+  },
+  headerContent: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: theme.spacing.xxlarge, // Adjust for status bar
+    paddingHorizontal: theme.spacing.large,
   },
-  title: {
-    fontSize: theme.typography.fontSize.h2,
-    fontWeight: '700',
-    color: theme.colors.text.dark,
+  headerTitle: {
+    fontSize: theme.typography.fontSize.h1,
+    fontWeight: 'bold',
+    color: theme.colors.text.white,
+    marginBottom: theme.spacing.xsmall,
   },
-  headerButtons: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  headerSubtitle: {
+    fontSize: theme.typography.fontSize.body,
+    color: theme.colors.text.white,
+    opacity: 0.9,
   },
   addButton: {
+    ...theme.shadows.medium,
+  },
+  addButtonGradient: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: theme.spacing.large,
+    marginBottom: theme.spacing.large,
+    gap: theme.spacing.small,
+  },
+  filterButton: {
+    paddingHorizontal: theme.spacing.medium,
+    paddingVertical: theme.spacing.small,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.background.card,
+    borderWidth: 1,
+    borderColor: theme.colors.border.light,
+  },
+  selectedFilterButton: {
+    backgroundColor: theme.colors.primary,
+    borderColor: theme.colors.primary,
+  },
+  filterButtonText: {
+    fontSize: theme.typography.fontSize.small,
+    color: theme.colors.text.secondary,
+    fontWeight: '500',
+  },
+  selectedFilterButtonText: {
+    color: theme.colors.text.white,
+  },
+  listContainer: {
+    flex: 1,
+  },
+  listContent: {
+    paddingHorizontal: theme.spacing.large,
+    paddingBottom: theme.spacing.xxlarge,
+  },
+  leadCardContainer: {
+    marginBottom: theme.spacing.medium,
+  },
+  leadCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: theme.spacing.medium,
+  },
+  leadInfo: {
+    flex: 1,
+  },
+  leadName: {
+    fontSize: theme.typography.fontSize.large,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+    marginBottom: theme.spacing.xsmall,
+  },
+  leadMeta: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: theme.colors.primary + '10', // A lighter shade of primary for the button background
-    paddingVertical: theme.spacing.small,
-    paddingHorizontal: theme.spacing.medium,
-    borderRadius: theme.borderRadius,
-    marginLeft: theme.spacing.small,
-    ...theme.cardShadow, // Apply consistent shadow
+    gap: theme.spacing.xsmall,
   },
-  addButtonText: {
-    marginLeft: theme.spacing.xsmall,
-    fontSize: theme.typography.fontSize.body,
-    color: theme.colors.primary,
+  leadEmail: {
+    fontSize: theme.typography.fontSize.small,
+    color: theme.colors.text.tertiary,
+  },
+  statusBadge: {
+    paddingHorizontal: theme.spacing.small,
+    paddingVertical: theme.spacing.xsmall,
+    borderRadius: theme.borderRadius.small,
+  },
+  statusText: {
+    fontSize: theme.typography.fontSize.caption,
     fontWeight: '600',
+  },
+  leadDetails: {
+    marginBottom: theme.spacing.medium,
+    gap: theme.spacing.small,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.small,
+  },
+  detailText: {
+    fontSize: theme.typography.fontSize.small,
+    color: theme.colors.text.secondary,
+  },
+  leadActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: theme.spacing.medium,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border.light,
+  },
+  leadScore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xsmall,
+  },
+  scoreIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  scoreText: {
+    fontSize: theme.typography.fontSize.caption,
+    color: theme.colors.text.tertiary,
+    fontWeight: '500',
+  },
+  actionButtons: {
+    flexDirection: 'row',
+    gap: theme.spacing.small,
+  },
+  actionButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: theme.colors.background.screen,
+    backgroundColor: theme.colors.background.secondary,
     padding: theme.spacing.large,
   },
   loadingText: {
     marginTop: theme.spacing.medium,
     fontSize: theme.typography.fontSize.body,
-    color: theme.colors.text.medium,
+    color: theme.colors.text.secondary,
   },
   errorText: {
     fontSize: theme.typography.fontSize.body,
     color: theme.colors.danger,
-    marginBottom: theme.spacing.medium,
+    marginVertical: theme.spacing.medium,
     textAlign: 'center',
   },
   emptyState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: theme.spacing.xlarge,
-    backgroundColor: theme.colors.background.card, // Make empty state background match cards
-    marginHorizontal: theme.spacing.large,
-    borderRadius: theme.borderRadius,
-    ...theme.cardShadow,
+    paddingHorizontal: theme.spacing.xlarge,
+  },
+  emptyStateTitle: {
+    fontSize: theme.typography.fontSize.h3,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
     marginTop: theme.spacing.large,
+    marginBottom: theme.spacing.small,
   },
   emptyStateText: {
-    fontSize: theme.typography.fontSize.large,
-    color: theme.colors.text.light,
-    marginTop: theme.spacing.medium,
-    marginBottom: theme.spacing.large,
+    fontSize: theme.typography.fontSize.body,
+    color: theme.colors.text.tertiary,
     textAlign: 'center',
+    marginBottom: theme.spacing.xlarge,
+    lineHeight: 24,
   },
-  listContentContainer: {
-    paddingHorizontal: theme.spacing.large,
-    paddingVertical: theme.spacing.large,
+  emptyStateButton: {
+    minWidth: 200,
   },
-  leadCard: {
-    backgroundColor: theme.colors.background.card,
-    borderRadius: theme.borderRadius,
-    padding: theme.spacing.medium,
-    marginBottom: theme.spacing.medium,
-    ...theme.cardShadow,
-  },
-  leadCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: theme.spacing.small,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border,
-    paddingBottom: theme.spacing.xsmall,
-  },
-  leadName: {
-    fontSize: theme.typography.fontSize.large,
-    fontWeight: '600',
-    color: theme.colors.text.dark,
-  },
-  leadStatus: {
-    fontSize: theme.typography.fontSize.small,
-    fontWeight: 'bold',
-    backgroundColor: theme.colors.success + '20', // Default green for status, will be overridden by getStatusStyle
-    color: theme.colors.success, // Default green for status, will be overridden by getStatusStyle
-    paddingHorizontal: theme.spacing.small,
-    paddingVertical: theme.spacing.xsmall,
-    borderRadius: theme.borderRadius - 4, // Slightly smaller radius for badge
-    overflow: 'hidden', // Ensure background doesn't bleed out
-  },
-  leadInfo: {
-    marginBottom: theme.spacing.small,
-  },
-  leadDetail: {
-    fontSize: theme.typography.fontSize.small,
-    color: theme.colors.text.medium,
-    marginBottom: theme.spacing.xsmall / 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    lineHeight: theme.typography.fontSize.small * 1.5, // Improve line spacing
-  },
-  detailLabel: {
-    fontWeight: '600',
-    color: theme.colors.text.dark,
-    marginRight: theme.spacing.xsmall,
-  },
-  leadActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: theme.spacing.small, // Use gap for spacing between buttons
-    marginTop: theme.spacing.small,
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border,
-    paddingTop: theme.spacing.small,
-  },
-  // actionButton and actionButtonText styles are now handled by the custom Button component,
-  // so they are removed from here.
 });
 
 export default LeadsScreen;
